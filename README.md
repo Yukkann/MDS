@@ -1,33 +1,48 @@
-# MDS - Traffic Risk Dashboard Demo
+# 基於臺中市交通事故資料之事故嚴重程度預測與決策支援分析（Dashboard Demo）
 
-## Quick start
+本 Demo 以 **臺中市** 為主，提供可即時展示的風險地圖與決策建議頁面。即使目前還沒有組員整理好的圖表與最終資料，也可先用內建假資料完成展示。
+
+## 1) 怎麼跑（本機）
 
 ```bash
+cd /workspace/MDS
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run dashboard_app.py
 ```
 
-## What this demo includes
+啟動後瀏覽器會自動開啟，若未開啟可手動進入終端顯示網址（通常是 `http://localhost:8501`）。
 
-- KPI overview for accident/risk indicators
-- GPS-based risk map with high/medium/low levels
-- Decision recommendation table by threshold
-- High-risk time analysis and area comparison
-- Sidebar controls for city/month filters and threshold tuning
+## 2) 現在就能展示的內容
 
-## Data
+- KPI：事故總數 / 高風險事件 / 平均風險 / 死傷示意
+- **臺中市地圖**（主頁）：高/中/低風險點位
+- 決策建議清單（Top 15）
+- 高風險時段分析
+- 臺中市各行政區風險比較
+- 風險門檻調整（高風險與中風險）
 
-You can run with built-in synthetic demo data immediately.
+## 3) 上傳真實資料（CSV）
 
-If you upload your own CSV, include at least these columns:
+至少需要欄位：
 
-- `pred_prob`
-- `city`
-- `hour`
-- `lat`
-- `lon`
+- `pred_prob`（模型預測機率）
+- `hour`（事故時）
+- `lat`（緯度）
+- `lon`（經度）
 
-Optional columns used for richer display:
-- `month`, `district`, `accident_type`, `deaths`, `injuries`
+建議欄位（有會更完整）：
+
+- `month`, `district`, `accident_type`, `deaths`, `injuries`, `city`
+
+> 若 CSV 含 `city` 欄位，系統會自動篩出「台中/臺中」資料，符合題目範圍。
+
+## 4) 題目對應
+
+- 題目：**基於臺中市交通事故資料之事故嚴重程度預測與決策支援分析**
+- 資料期間：**114 年 10 月 ~ 12 月**（Demo 內建資料也對應此期間）
+- 決策規則：
+  - 高風險（P ≥ 0.7）：優先派遣警力 / 加強巡邏
+  - 中風險（0.4 ≤ P < 0.7）：定期巡查
+  - 低風險（P < 0.4）：維持現狀

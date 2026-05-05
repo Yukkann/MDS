@@ -1,63 +1,45 @@
 import numpy as np
 import pandas as pd
-import streamlit as st
 import plotly.express as px
-import plotly.graph_objects as go
+import streamlit as st
 from datetime import datetime
 
-st.set_page_config(page_title="Traffic Risk DSS Demo", layout="wide")
+st.set_page_config(page_title="Taichung Traffic Risk DSS Demo", layout="wide")
+
+TAICHUNG_CENTER = {"lat": 24.1477, "lon": 120.6736}
+TAICHUNG_DISTRICTS = [
+    "中區", "東區", "南區", "西區", "北區", "北屯區", "西屯區", "南屯區",
+    "太平區", "大里區", "霧峰區", "烏日區", "豐原區", "后里區", "石岡區", "東勢區",
+    "新社區", "潭子區", "大雅區", "神岡區", "大肚區", "沙鹿區", "龍井區", "梧棲區",
+    "清水區", "大甲區", "外埔區", "大安區", "和平區"
+]
 
 
 @st.cache_data
 def generate_demo_data(n: int = 1200, seed: int = 42) -> pd.DataFrame:
+    """Generate Taichung-only synthetic records for October~December 2025 (ROC 114)."""
     rng = np.random.default_rng(seed)
-    cities = ["Taipei", "New Taipei", "Taoyuan", "Taichung", "Tainan", "Kaohsiung"]
-    districts = ["A", "B", "C", "D", "E"]
-    weather = ["Sunny", "Cloudy", "Rainy"]
-    road_category = ["Urban", "Provincial", "County"]
-    accident_types = ["Vehicle-Vehicle", "Vehicle-Pedestrian", "Single Vehicle"]
+    weather = ["晴", "陰", "雨"]
+    road_category = ["市區道路", "省道", "區道"]
+    accident_types = ["車與車", "車與行人", "單一車輛"]
 
     months = rng.choice([10, 11, 12], size=n, p=[0.33, 0.34, 0.33])
     hours = rng.integers(0, 24, size=n)
-    cities_col = rng.choice(cities, size=n)
-    district_col = rng.choice(districts, size=n)
+    districts = rng.choice(TAICHUNG_DISTRICTS, size=n)
     weather_col = rng.choice(weather, size=n, p=[0.5, 0.3, 0.2])
 
     base = (
-        0.15
-        + (hours >= 22) * 0.25
-        + (hours <= 5) * 0.20
-        + (weather_col == "Rainy") * 0.15
+        0.18
+        + (hours >= 22) * 0.22
+        + (hours <= 5) * 0.18
+        + (weather_col == "雨") * 0.14
         + rng.normal(0, 0.08, n)
     )
     pred_prob = np.clip(base, 0.01, 0.99)
     severity_bin = (pred_prob > 0.45).astype(int)
 
-    risk_level = pd.cut(
-        pred_prob,
-        bins=[-0.01, 0.4, 0.7, 1.0],
-        labels=["Low", "Medium", "High"],
-    )
-
-    lat_base = {
-        "Taipei": 25.04,
-        "New Taipei": 25.01,
-        "Taoyuan": 24.99,
-        "Taichung": 24.15,
-        "Tainan": 22.99,
-        "Kaohsiung": 22.63,
-    }
-    lon_base = {
-        "Taipei": 121.56,
-        "New Taipei": 121.46,
-        "Taoyuan": 121.30,
-        "Taichung": 120.67,
-        "Tainan": 120.20,
-        "Kaohsiung": 120.30,
-    }
-
-    lats = [lat_base[c] + rng.normal(0, 0.03) for c in cities_col]
-    lons = [lon_base[c] + rng.normal(0, 0.03) for c in cities_col]
+    lats = TAICHUNG_CENTER["lat"] + rng.normal(0, 0.06, size=n)
+    lons = TAICHUNG_CENTER["lon"] + rng.normal(0, 0.06, size=n)
 
     df = pd.DataFrame(
         {
@@ -65,13 +47,12 @@ def generate_demo_data(n: int = 1200, seed: int = 42) -> pd.DataFrame:
             "month": months,
             "day": rng.integers(1, 29, size=n),
             "hour": hours,
-            "city": cities_col,
-            "district": district_col,
+            "city": "臺中市",
+            "district": districts,
             "weather": weather_col,
             "road_category": rng.choice(road_category, size=n),
             "accident_type": rng.choice(accident_types, size=n),
             "pred_prob": pred_prob,
-            "risk_level": risk_level,
             "severity_bin": severity_bin,
             "deaths": (pred_prob > 0.8).astype(int),
             "injuries": np.where(severity_bin == 1, rng.integers(1, 4, size=n), rng.integers(0, 2, size=n)),
@@ -79,7 +60,6 @@ def generate_demo_data(n: int = 1200, seed: int = 42) -> pd.DataFrame:
             "lon": lons,
         }
     )
-
     return df
 
 
@@ -92,25 +72,31 @@ def strategy_by_risk(risk: str) -> str:
     return mapping.get(risk, "維持現狀")
 
 
-st.title("🚦 交通事故風險決策支援 Dashboard（Demo 版）")
-st.caption("可先用內建假資料展示流程，之後再替換成真實資料。")
+st.title("🚦 基於臺中市交通事故資料之事故嚴重程度預測與決策支援分析（Demo）")
+st.caption("資料範圍：114 年 10~12 月。可先用內建假資料展示流程，再替換為臺中市警察局實際資料。")
 
 with st.sidebar:
     st.header("控制面板")
-    uploaded = st.file_uploader("上傳資料（CSV）", type=["csv"])
+    uploaded = st.file_uploader("上傳臺中市事故資料（CSV）", type=["csv"])
     threshold_high = st.slider("高風險門檻 (P ≥)", 0.5, 0.9, 0.7, 0.01)
     threshold_mid = st.slider("中風險下限 (P ≥)", 0.2, 0.6, 0.4, 0.01)
     st.markdown("---")
-    st.write("若未上傳資料，系統會使用內建 Demo 資料。")
+    st.write("若未上傳資料，系統使用臺中市範圍之內建 Demo 資料。")
 
 if uploaded is not None:
     df = pd.read_csv(uploaded)
-    required_cols = {"pred_prob", "city", "hour", "lat", "lon"}
+    required_cols = {"pred_prob", "hour", "lat", "lon"}
     if not required_cols.issubset(df.columns):
         st.error(f"CSV 缺少必要欄位: {required_cols}")
         st.stop()
+    if "city" in df.columns:
+        df = df[df["city"].astype(str).str.contains("台中|臺中", na=False)].copy()
 else:
     df = generate_demo_data()
+
+if df.empty:
+    st.error("目前篩選後無臺中市資料，請確認上傳資料內容。")
+    st.stop()
 
 bins = [-0.01, threshold_mid, threshold_high, 1.0]
 labels = ["Low", "Medium", "High"]
@@ -120,12 +106,20 @@ if threshold_mid >= threshold_high:
 
 df["risk_level"] = pd.cut(df["pred_prob"], bins=bins, labels=labels)
 df["strategy"] = df["risk_level"].astype(str).map(strategy_by_risk)
+if "month" not in df.columns:
+    df["month"] = 10
+if "district" not in df.columns:
+    df["district"] = "未提供"
+if "accident_type" not in df.columns:
+    df["accident_type"] = "未提供"
 
-cities = sorted(df["city"].dropna().unique().tolist())
-sel_city = st.multiselect("篩選城市", cities, default=cities)
-sel_month = st.multiselect("篩選月份", sorted(df["month"].unique().tolist()), default=sorted(df["month"].unique().tolist()))
+sel_month = st.multiselect("篩選月份", sorted(df["month"].dropna().unique().tolist()), default=sorted(df["month"].dropna().unique().tolist()))
+sel_district = st.multiselect("篩選行政區", sorted(df["district"].dropna().unique().tolist()), default=sorted(df["district"].dropna().unique().tolist()))
 
-view = df[df["city"].isin(sel_city) & df["month"].isin(sel_month)].copy()
+view = df[df["month"].isin(sel_month) & df["district"].isin(sel_district)].copy()
+if view.empty:
+    st.warning("目前篩選條件下沒有資料。")
+    st.stop()
 
 k1, k2, k3, k4, k5, k6 = st.columns(6)
 k1.metric("事故總數", f"{len(view):,}")
@@ -137,16 +131,17 @@ k6.metric("更新時間", datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"))
 
 left, right = st.columns([2, 1])
 with left:
-    st.subheader("事故風險地圖")
+    st.subheader("臺中市事故風險地圖")
     fig_map = px.scatter_map(
         view,
         lat="lat",
         lon="lon",
         color="risk_level",
         color_discrete_map={"Low": "green", "Medium": "orange", "High": "red"},
-        hover_data=["city", "hour", "pred_prob", "strategy", "accident_type"],
-        zoom=6,
-        height=550,
+        hover_data=["district", "hour", "pred_prob", "strategy", "accident_type"],
+        zoom=11,
+        center=TAICHUNG_CENTER,
+        height=580,
     )
     fig_map.update_layout(map_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0))
     st.plotly_chart(fig_map, use_container_width=True)
@@ -155,7 +150,7 @@ with right:
     st.subheader("決策建議清單（Top 15）")
     rec = (
         view.sort_values("pred_prob", ascending=False)
-        .loc[:, ["city", "district", "hour", "pred_prob", "risk_level", "strategy"]]
+        .loc[:, ["district", "hour", "pred_prob", "risk_level", "strategy"]]
         .head(15)
     )
     st.dataframe(rec, use_container_width=True, hide_index=True)
@@ -168,18 +163,16 @@ with c1:
         .groupby("hour", as_index=False)["is_high"]
         .sum()
     )
-    fig_hour = px.bar(hourly, x="hour", y="is_high", labels={"is_high": "高風險件數", "hour": "小時"})
-    st.plotly_chart(fig_hour, use_container_width=True)
+    st.plotly_chart(px.bar(hourly, x="hour", y="is_high", labels={"is_high": "高風險件數", "hour": "小時"}), use_container_width=True)
 
 with c2:
-    st.subheader("區域風險比較")
+    st.subheader("臺中市各行政區風險比較")
     area = (
-        view.groupby("city", as_index=False)["pred_prob"]
+        view.groupby("district", as_index=False)["pred_prob"]
         .mean()
         .sort_values("pred_prob", ascending=False)
     )
-    fig_area = px.bar(area, x="city", y="pred_prob", labels={"pred_prob": "平均風險機率", "city": "城市"})
-    st.plotly_chart(fig_area, use_container_width=True)
+    st.plotly_chart(px.bar(area, x="district", y="pred_prob", labels={"pred_prob": "平均風險機率", "district": "行政區"}), use_container_width=True)
 
 st.markdown("---")
 st.subheader("模型說明（Demo 佔位）")
