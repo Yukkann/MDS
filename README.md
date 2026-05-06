@@ -14,14 +14,27 @@ streamlit run dashboard_app.py
 
 啟動後瀏覽器會自動開啟，若未開啟可手動進入終端顯示網址（通常是 `http://localhost:8501`）。
 
-## 2) 現在就能展示的內容
+## 2) 目前頁面與功能
 
+### A. 決策總覽
 - KPI：事故總數 / 高風險事件 / 平均風險 / 死傷示意
-- **臺中市地圖**（主頁）：高/中/低風險點位
+- **臺中市地圖（主頁）且可開關圖層**：
+  - 歷史事故點
+  - 模型高風險預測點
+  - 建議巡邏區域
 - 決策建議清單（Top 15）
 - 高風險時段分析
 - 臺中市各行政區風險比較
-- 風險門檻調整（高風險與中風險）
+
+### B. 模型效能頁
+- 模型指標表（Accuracy / Precision / Recall / F1 / ROC-AUC / PR-AUC）
+- Recall 比較圖
+- PR-AUC 比較圖
+- Confusion Matrix（示意）
+
+### C. 關鍵因子頁
+- 特徵重要性圖（Demo，可替換為 SHAP）
+- 解讀文字區（可改為 SHAP summary / dependence / local explanation）
 
 ## 3) 上傳真實資料（CSV）
 
