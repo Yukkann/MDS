@@ -45,6 +45,14 @@ streamlit run dashboard_app.py
 - `lat`（緯度）
 - `lon`（經度）
 
+> 若你們目前尚未產出 `prob_pred / pred_prob`，可先提供 `Y_事故嚴重度`（0/1）；系統會暫時轉為示意風險機率（0→0.2、1→0.8）以便展示流程。
+
+### 目前也支援你們這組欄位命名
+
+- `GPS座標X` 自動對應為 `lon`
+- `GPS座標Y` 自動對應為 `lat`
+- 若沒有 `district`，會嘗試從 one-hot 欄位（例如 `區_北屯區`、`區_西屯區`）還原行政區
+
 建議欄位（有會更完整）：
 
 - `month`, `district`, `accident_type`, `deaths`, `injuries`, `city`
