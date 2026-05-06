@@ -87,6 +87,34 @@ def generate_demo_feature_importance(seed: int = 42) -> pd.DataFrame:
     return pd.DataFrame({"feature": features, "importance": vals})
 
 
+
+
+def normalize_uploaded_df(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {
+        "GPS座標X": "lon",
+        "GPS座標Y": "lat",
+        "區": "district",
+        "道路速限": "speed_limit",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}).copy()
+
+    if "pred_prob" not in df.columns:
+        if "prob_pred" in df.columns:
+            df["pred_prob"] = pd.to_numeric(df["prob_pred"], errors="coerce")
+        elif "Y_事故嚴重度" in df.columns:
+            sev = pd.to_numeric(df["Y_事故嚴重度"], errors="coerce")
+            df["pred_prob"] = sev.map({0: 0.2, 1: 0.8})
+
+    if "district" not in df.columns:
+        district_cols = [col for col in df.columns if col.startswith("區_")]
+        if district_cols:
+            dummies = df[district_cols].fillna(0)
+            max_idx = dummies.idxmax(axis=1)
+            has_any = dummies.max(axis=1) > 0
+            df["district"] = np.where(has_any, max_idx.str.replace("區_", "", regex=False), "未提供")
+
+    return df
+
 def strategy_by_risk(risk: str) -> str:
     mapping = {
         "High": "優先派遣警力 / 加強巡邏",
@@ -166,15 +194,12 @@ with st.sidebar:
     threshold_high = st.slider("高風險門檻 (P ≥)", 0.5, 0.9, 0.7, 0.01)
     threshold_mid = st.slider("中風險下限 (P ≥)", 0.2, 0.6, 0.4, 0.01)
     st.markdown("---")
-    st.subheader("地圖圖層開關")
-    show_hist = st.checkbox("歷史事故點", value=True)
-    show_high = st.checkbox("模型高風險預測點", value=True)
-    show_patrol = st.checkbox("建議巡邏區域", value=True)
+    st.caption("地圖圖層開關已移到主畫面地圖上方，避免找不到。")
     st.markdown("---")
     st.write("若未上傳資料，系統使用臺中市範圍之內建 Demo 資料。")
 
 if uploaded is not None:
-    df = pd.read_csv(uploaded)
+    df = normalize_uploaded_df(pd.read_csv(uploaded))
     required_cols = {"pred_prob", "hour", "lat", "lon"}
     if not required_cols.issubset(df.columns):
         st.error(f"CSV 缺少必要欄位: {required_cols}")
@@ -222,6 +247,20 @@ with tab1:
     left, right = st.columns([2, 1])
     with left:
         st.subheader("臺中市事故風險地圖（可開關圖層）")
+        layer_labels = {
+            "歷史事故點": "show_hist",
+            "模型高風險預測點": "show_high",
+            "建議巡邏區域": "show_patrol",
+        }
+        selected_layers = st.multiselect(
+            "選擇要顯示的地圖圖層",
+            options=list(layer_labels.keys()),
+            default=list(layer_labels.keys()),
+            help="可同時勾選多個圖層。",
+        )
+        show_hist = "歷史事故點" in selected_layers
+        show_high = "模型高風險預測點" in selected_layers
+        show_patrol = "建議巡邏區域" in selected_layers
         st.plotly_chart(build_layered_map(view, show_hist, show_high, show_patrol), use_container_width=True)
     with right:
         st.subheader("決策建議清單（Top 15）")
