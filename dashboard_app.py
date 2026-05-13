@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from datetime import datetime
+from pathlib import Path
 
 st.set_page_config(page_title="Taichung Traffic Risk DSS Demo", layout="wide")
 
@@ -14,6 +15,10 @@ TAICHUNG_DISTRICTS = [
     "新社區", "潭子區", "大雅區", "神岡區", "大肚區", "沙鹿區", "龍井區", "梧棲區",
     "清水區", "大甲區", "外埔區", "大安區", "和平區"
 ]
+
+PROCESSED_DATA_PATH = Path("MDS_model/MDS_model/processed_data.csv")
+SHAP_ARTIFACT_PATH = Path("MDS_model/MDS_model/shap_dashboard_data.npz")
+CONTINUOUS_COLS = ["GPS座標X", "GPS座標Y", "hour", "month", "weekday", "道路速限"]
 
 
 @st.cache_data
@@ -63,57 +68,168 @@ def generate_demo_data(n: int = 1200, seed: int = 42) -> pd.DataFrame:
     return df
 
 
+
 @st.cache_data
-def generate_demo_model_scores(seed: int = 42) -> pd.DataFrame:
-    rng = np.random.default_rng(seed)
-    return pd.DataFrame(
-        {
-            "Model": ["Logistic Regression", "Random Forest", "AdaBoost", "XGBoost"],
-            "Accuracy": [0.74, 0.81, 0.79, 0.83],
-            "Precision": [0.62, 0.73, 0.70, 0.75],
-            "Recall": [0.71, 0.82, 0.80, 0.85],
-            "F1": [0.66, 0.77, 0.75, 0.79],
-            "ROC_AUC": [0.79, 0.87, 0.85, 0.89],
-            "PR_AUC": [0.58, 0.72, 0.69, 0.75],
+def load_precomputed_shap_dashboard_data(artifact_path: str) -> dict:
+    path = Path(artifact_path)
+    if not path.exists():
+        return {
+            "error": (
+                f"找不到 SHAP 預計算檔：{artifact_path}。"
+                "請先執行 `py -3.9 precompute_shap.py`。"
+            )
         }
-    )
 
-
-@st.cache_data
-def generate_demo_feature_importance(seed: int = 42) -> pd.DataFrame:
-    rng = np.random.default_rng(seed)
-    features = ["天候", "路口型態", "照明", "速限", "事故型態", "肇因", "是否酒駕", "時間", "車種", "道路類別"]
-    vals = np.sort(rng.uniform(0.02, 0.24, size=len(features)))[::-1]
-    return pd.DataFrame({"feature": features, "importance": vals})
-
-
-
-
-def normalize_uploaded_df(df: pd.DataFrame) -> pd.DataFrame:
-    rename_map = {
-        "GPS座標X": "lon",
-        "GPS座標Y": "lat",
-        "區": "district",
-        "道路速限": "speed_limit",
+    artifact = np.load(path, allow_pickle=True)
+    return {
+        "Logistic Regression": {
+            "features": artifact["lr_features"].tolist(),
+            "values": artifact["lr_values"],
+            "data": pd.DataFrame(artifact["lr_data"], columns=artifact["lr_features"].tolist()),
+            "base_value": float(artifact["lr_base_value"]),
+            "waterfall_idx": int(artifact["waterfall_idx"]),
+        },
+        "Random Forest": {
+            "features": artifact["rf_features"].tolist(),
+            "values": artifact["rf_values"],
+            "data": pd.DataFrame(artifact["rf_data"], columns=artifact["rf_features"].tolist()),
+            "base_value": float(artifact["rf_base_value"]),
+            "waterfall_idx": int(artifact["waterfall_idx"]),
+        },
     }
-    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}).copy()
 
-    if "pred_prob" not in df.columns:
-        if "prob_pred" in df.columns:
-            df["pred_prob"] = pd.to_numeric(df["prob_pred"], errors="coerce")
-        elif "Y_事故嚴重度" in df.columns:
-            sev = pd.to_numeric(df["Y_事故嚴重度"], errors="coerce")
-            df["pred_prob"] = sev.map({0: 0.2, 1: 0.8})
 
-    if "district" not in df.columns:
-        district_cols = [col for col in df.columns if col.startswith("區_")]
-        if district_cols:
-            dummies = df[district_cols].fillna(0)
-            max_idx = dummies.idxmax(axis=1)
-            has_any = dummies.max(axis=1) > 0
-            df["district"] = np.where(has_any, max_idx.str.replace("區_", "", regex=False), "未提供")
+def make_shap_summary_bar(shap_data: dict, title: str, top_n: int = 15) -> go.Figure:
+    values = shap_data["values"]
+    features = np.asarray(shap_data["features"])
+    mean_abs = np.abs(values).mean(axis=0)
+    order = np.argsort(mean_abs)[-top_n:]
+    plot_df = pd.DataFrame(
+        {
+            "feature": features[order],
+            "mean_abs_shap": mean_abs[order],
+        }
+    ).sort_values("mean_abs_shap")
+    fig = px.bar(
+        plot_df,
+        x="mean_abs_shap",
+        y="feature",
+        orientation="h",
+        labels={"mean_abs_shap": "平均 |SHAP value|", "feature": "特徵"},
+        title=title,
+    )
+    fig.update_layout(height=520, margin=dict(l=10, r=10, t=50, b=10))
+    return fig
 
-    return df
+
+def make_shap_beeswarm(shap_data: dict, title: str, top_n: int = 15, seed: int = 42) -> go.Figure:
+    values = shap_data["values"]
+    data = shap_data["data"]
+    features = np.asarray(shap_data["features"])
+    mean_abs = np.abs(values).mean(axis=0)
+    top_idx = np.argsort(mean_abs)[-top_n:][::-1]
+    rng = np.random.default_rng(seed)
+
+    rows = []
+    for rank, feature_idx in enumerate(top_idx):
+        feature = features[feature_idx]
+        feature_values = data.iloc[:, feature_idx].to_numpy(dtype=float)
+        min_val = np.nanmin(feature_values)
+        max_val = np.nanmax(feature_values)
+        if np.isclose(min_val, max_val):
+            color_values = np.full(len(feature_values), 0.5)
+        else:
+            color_values = (feature_values - min_val) / (max_val - min_val)
+        y_base = len(top_idx) - rank - 1
+        jitter = rng.normal(0, 0.08, size=len(feature_values))
+        rows.append(
+            pd.DataFrame(
+                {
+                    "shap_value": values[:, feature_idx],
+                    "feature": feature,
+                    "feature_value": feature_values,
+                    "color_value": color_values,
+                    "y": y_base + jitter,
+                }
+            )
+        )
+    plot_df = pd.concat(rows, ignore_index=True)
+
+    fig = go.Figure(
+        go.Scattergl(
+            x=plot_df["shap_value"],
+            y=plot_df["y"],
+            mode="markers",
+            marker=dict(
+                size=6,
+                color=plot_df["color_value"],
+                colorscale="RdBu_r",
+                colorbar=dict(title="特徵值<br>低 → 高"),
+                opacity=0.72,
+            ),
+            text=plot_df["feature"],
+            customdata=np.stack([plot_df["feature_value"]], axis=1),
+            hovertemplate="特徵: %{text}<br>SHAP: %{x:.4f}<br>特徵值: %{customdata[0]:.4f}<extra></extra>",
+        )
+    )
+    fig.add_vline(x=0, line_width=1, line_dash="dash", line_color="#666")
+    fig.update_layout(
+        title=title,
+        xaxis_title="SHAP value（往右代表推高致命事故預測）",
+        yaxis=dict(
+            tickmode="array",
+            tickvals=list(range(len(top_idx))),
+            ticktext=list(features[top_idx][::-1]),
+        ),
+        height=620,
+        margin=dict(l=10, r=10, t=50, b=10),
+    )
+    return fig
+
+
+def make_shap_waterfall(shap_data: dict, title: str, top_n: int = 12) -> go.Figure:
+    values = shap_data["values"]
+    data = shap_data["data"]
+    features = np.asarray(shap_data["features"])
+    idx = shap_data["waterfall_idx"]
+    row_values = values[idx]
+    order = np.argsort(np.abs(row_values))[::-1]
+    top_idx = order[:top_n]
+    other_idx = order[top_n:]
+
+    x_labels = [
+        f"{features[i]} = {data.iloc[idx, i]:.3g}"
+        for i in top_idx
+    ]
+    y_values = [float(row_values[i]) for i in top_idx]
+    if len(other_idx):
+        x_labels.append(f"其他 {len(other_idx)} 個特徵")
+        y_values.append(float(row_values[other_idx].sum()))
+
+    total_value = shap_data["base_value"] + float(row_values.sum())
+    fig = go.Figure(
+        go.Waterfall(
+            name="SHAP",
+            orientation="v",
+            measure=["relative"] * len(y_values) + ["total"],
+            x=x_labels + ["模型輸出"],
+            y=y_values + [total_value],
+            base=shap_data["base_value"],
+            connector={"line": {"color": "#888"}},
+            increasing={"marker": {"color": "#D62728"}},
+            decreasing={"marker": {"color": "#1F77B4"}},
+            totals={"marker": {"color": "#333333"}},
+            hovertemplate="%{x}<br>貢獻: %{y:.4f}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=title,
+        yaxis_title="模型輸出值",
+        height=560,
+        margin=dict(l=10, r=10, t=50, b=80),
+    )
+    return fig
+
 
 def strategy_by_risk(risk: str) -> str:
     mapping = {
@@ -129,28 +245,34 @@ def build_layered_map(view: pd.DataFrame, show_hist: bool, show_high: bool, show
 
     if show_hist:
         fig.add_trace(
-            go.Scattermap(
+            go.Densitymap(
                 lat=view["lat"],
                 lon=view["lon"],
-                mode="markers",
-                name="歷史事故點",
-                marker=dict(size=6, color="#4C78A8", opacity=0.45),
+                z=np.ones(len(view)),
+                radius=22,
+                name="歷史事故熱區",
+                colorscale="Blues",
+                opacity=0.55,
+                colorbar=dict(title="事故密度"),
                 text=view["district"],
-                hovertemplate="歷史事故點<br>行政區: %{text}<extra></extra>",
+                hovertemplate="歷史事故熱區<br>行政區: %{text}<extra></extra>",
             )
         )
 
     high = view[view["risk_level"] == "High"]
     if show_high and not high.empty:
         fig.add_trace(
-            go.Scattermap(
+            go.Densitymap(
                 lat=high["lat"],
                 lon=high["lon"],
-                mode="markers",
-                name="模型高風險預測點",
-                marker=dict(size=10, color="red", opacity=0.8),
+                z=high["pred_prob"],
+                radius=28,
+                name="模型高風險熱區",
+                colorscale="YlOrRd",
+                opacity=0.72,
+                colorbar=dict(title="風險強度", x=1.08),
                 text=(high["district"] + " | P=" + high["pred_prob"].round(2).astype(str)),
-                hovertemplate="模型高風險預測點<br>%{text}<extra></extra>",
+                hovertemplate="模型高風險熱區<br>%{text}<extra></extra>",
             )
         )
 
@@ -168,7 +290,7 @@ def build_layered_map(view: pd.DataFrame, show_hist: bool, show_high: bool, show
                     lon=patrol["lon"],
                     mode="markers+text",
                     name="建議巡邏區域",
-                    marker=dict(size=16, color="#F39C12", symbol="star"),
+                    marker=dict(size=16, color="#F34312", symbol="star"),
                     text=patrol["district"],
                     textposition="top right",
                     hovertemplate="建議巡邏區域<br>%{text}<br>高風險點數: %{customdata[0]}<br>平均P: %{customdata[1]:.2f}<extra></extra>",
@@ -185,8 +307,8 @@ def build_layered_map(view: pd.DataFrame, show_hist: bool, show_high: bool, show
     return fig
 
 
-st.title("🚦 基於臺中市交通事故資料之事故嚴重程度預測與決策支援分析（Demo）")
-st.caption("資料範圍：114 年 10~12 月。可先用內建假資料展示流程，再替換為臺中市警察局實際資料。")
+st.title("臺中市交通事故資料之事故嚴重程度預測與決策支援分析Dashboard（Demo）")
+st.caption("資料範圍：114 年 10~12 月")
 
 with st.sidebar:
     st.header("控制面板")
@@ -194,12 +316,14 @@ with st.sidebar:
     threshold_high = st.slider("高風險門檻 (P ≥)", 0.5, 0.9, 0.7, 0.01)
     threshold_mid = st.slider("中風險下限 (P ≥)", 0.2, 0.6, 0.4, 0.01)
     st.markdown("---")
-    st.caption("地圖圖層開關已移到主畫面地圖上方，避免找不到。")
+    st.subheader("地圖圖層開關")
+    show_hist = st.checkbox("歷史事故熱區", value=True)
+    show_high = st.checkbox("模型高風險熱區", value=True)
+    show_patrol = st.checkbox("建議巡邏區域", value=True)
     st.markdown("---")
-    st.write("若未上傳資料，系統使用臺中市範圍之內建 Demo 資料。")
 
 if uploaded is not None:
-    df = normalize_uploaded_df(pd.read_csv(uploaded))
+    df = pd.read_csv(uploaded)
     required_cols = {"pred_prob", "hour", "lat", "lon"}
     if not required_cols.issubset(df.columns):
         st.error(f"CSV 缺少必要欄位: {required_cols}")
@@ -233,7 +357,7 @@ if view.empty:
     st.warning("目前篩選條件下沒有資料。")
     st.stop()
 
-tab1, tab2, tab3 = st.tabs(["決策總覽", "模型效能頁", "關鍵因子頁"])
+tab1, tab2, tab3 = st.tabs(["決策總覽", "模型效能", "關鍵因子"])
 
 with tab1:
     k1, k2, k3, k4, k5, k6 = st.columns(6)
@@ -246,21 +370,7 @@ with tab1:
 
     left, right = st.columns([2, 1])
     with left:
-        st.subheader("臺中市事故風險地圖（可開關圖層）")
-        layer_labels = {
-            "歷史事故點": "show_hist",
-            "模型高風險預測點": "show_high",
-            "建議巡邏區域": "show_patrol",
-        }
-        selected_layers = st.multiselect(
-            "選擇要顯示的地圖圖層",
-            options=list(layer_labels.keys()),
-            default=list(layer_labels.keys()),
-            help="可同時勾選多個圖層。",
-        )
-        show_hist = "歷史事故點" in selected_layers
-        show_high = "模型高風險預測點" in selected_layers
-        show_patrol = "建議巡邏區域" in selected_layers
+        st.subheader("臺中市事故風險熱區地圖（可開關圖層）")
         st.plotly_chart(build_layered_map(view, show_hist, show_high, show_patrol), use_container_width=True)
     with right:
         st.subheader("決策建議清單（Top 15）")
@@ -283,32 +393,77 @@ with tab1:
 
 with tab2:
     st.subheader("模型效能頁")
-    st.caption("目前為 Demo 佔位資料；可替換為你們實際訓練結果。")
 
-    model_scores = generate_demo_model_scores()
+    model_scores = pd.DataFrame(
+        {
+            "Model": ["Logistic Regression", "Random Forest", "AdaBoost", "XGBoost"],
+            "Accuracy": [0.5638, 0.5674, 0.5750, 0.5531],
+            "Precision": [0.6299, 0.6212, 0.6050, 0.5986],
+            "Recall": [0.5354, 0.5829, 0.6943, 0.6123],
+            "F1": [0.5788, 0.6014, 0.6466, 0.6054],
+            "ROC_AUC": [0.5947, 0.5917, 0.5703, 0.5712],
+            "PR_AUC": [0.6341, 0.6380, 0.6027, 0.6186],
+        }
+    )
     st.dataframe(model_scores, use_container_width=True, hide_index=True)
 
     m1, m2 = st.columns(2)
     with m1:
-        fig_recall = px.bar(model_scores, x="Model", y="Recall", color="Model", title="Recall 比較（重點指標）")
+        fig_recall = px.bar(model_scores, x="Model", y="Recall", color="Model", title="Recall 比較")
         st.plotly_chart(fig_recall, use_container_width=True)
     with m2:
         fig_pr = px.bar(model_scores, x="Model", y="PR_AUC", color="Model", title="PR-AUC 比較")
         st.plotly_chart(fig_pr, use_container_width=True)
 
-    st.markdown("**Confusion Matrix（示意）**")
-    cm = np.array([[410, 66], [34, 190]])
-    cm_fig = px.imshow(cm, text_auto=True, color_continuous_scale="Blues", labels=dict(x="Predicted", y="Actual", color="Count"), x=["Non-severe", "Severe"], y=["Non-severe", "Severe"])
-    st.plotly_chart(cm_fig, use_container_width=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Confusion Matrix(Logistic Regression)**")
+        cm = np.array([[1012, 675], [997, 1149]])
+        cm_fig = px.imshow(cm, text_auto=True, color_continuous_scale="Blues", labels=dict(x="Predicted", y="True", color="Count"), x=['致命', '非致命'], y=['非致命', '致命'])
+        st.plotly_chart(cm_fig, use_container_width=True)
+    with c2:
+        st.markdown("**Confusion Matrix(Random Forest)**")
+        cm = np.array([[924, 763], [895, 1251]])
+        cm_fig = px.imshow(cm, text_auto=True, color_continuous_scale="Blues", labels=dict(x="Predicted", y="True", color="Count"), x=['致命', '非致命'], y=['非致命', '致命'])
+        st.plotly_chart(cm_fig, use_container_width=True)
+    c3, c4 = st.columns(2)
+    with c3:
+        st.markdown("**Confusion Matrix(AdaBoost)**")
+        cm = np.array([[714, 973], [656, 1490]])
+        cm_fig = px.imshow(cm, text_auto=True, color_continuous_scale="Blues", labels=dict(x="Predicted", y="True", color="Count"), x=['致命', '非致命'], y=['非致命', '致命'])
+        st.plotly_chart(cm_fig, use_container_width=True)
+    with c4:
+        st.markdown("**Confusion Matrix(XGBoost)**")
+        cm = np.array([[806, 881], [832, 1314]])
+        cm_fig = px.imshow(cm, text_auto=True, color_continuous_scale="Blues", labels=dict(x="Predicted", y="True", color="Count"), x=['致命', '非致命'], y=['非致命', '致命'])
+        st.plotly_chart(cm_fig, use_container_width=True)
 
 with tab3:
     st.subheader("關鍵因子頁")
-    st.caption("目前為 Demo 佔位資料；可替換為 SHAP 或特徵重要性結果。")
 
-    fi = generate_demo_feature_importance()
-    fig_fi = px.bar(fi.sort_values("importance", ascending=True), x="importance", y="feature", orientation="h", title="特徵重要性（Demo）")
-    st.plotly_chart(fig_fi, use_container_width=True)
+    st.markdown("**SHAP 模型解釋圖**")
+    shap_result = load_precomputed_shap_dashboard_data(str(SHAP_ARTIFACT_PATH))
+    if "error" in shap_result:
+        st.warning(shap_result["error"])
+    else:
+        lr_tab, rf_tab = st.tabs(["Logistic Regression", "Random Forest"])
+        for model_tab, model_name in [(lr_tab, "Logistic Regression"), (rf_tab, "Random Forest")]:
+            with model_tab:
+                model_shap = shap_result[model_name]
+                st.plotly_chart(
+                    make_shap_summary_bar(model_shap, f"{model_name} - Summary Bar Plot"),
+                    use_container_width=True,
+                )
+                st.plotly_chart(
+                    make_shap_beeswarm(model_shap, f"{model_name} - Beeswarm Plot"),
+                    use_container_width=True,
+                )
+                st.plotly_chart(
+                    make_shap_waterfall(model_shap, f"{model_name} - Waterfall Plot"),
+                    use_container_width=True,
+                )
 
-    st.markdown("**解讀建議（可替換為 SHAP 文案）**")
-    st.write("- 天候、路口型態、照明、速限等因子在示意模型中影響較大。")
-    st.write("- 可在此頁放入 SHAP summary plot、dependence plot、單筆個案解釋。")
+    st.markdown("**解讀建議:**")
+    st.write("- Summary Bar Plot 用來比較整體特徵重要性。")
+    st.write("- Beeswarm Plot 用來觀察特徵值高低如何推升或降低致命事故預測。")
+    st.write("- Waterfall Plot 用來解釋單一事故案例的預測來源。")
