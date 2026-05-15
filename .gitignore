@@ -1,0 +1,19 @@
+# 虛擬環境
+.venv/
+venv/
+env/
+
+# Python 快取
+__pycache__/
+*.pyc
+*.pyo
+
+# Log 檔
+*.log
+
+# Mac 系統檔
+.DS_Store
+__MACOSX/
+
+# Jupyter Notebook 暫存
+.ipynb_checkpoints/
