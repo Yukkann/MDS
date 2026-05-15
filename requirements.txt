@@ -2,3 +2,6 @@ streamlit>=1.35
 pandas>=2.1
 numpy>=1.26
 plotly>=5.22
+scikit-learn>=1.6
+shap>=0.49
+xgboost>=2.0

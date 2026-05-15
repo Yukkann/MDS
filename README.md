@@ -12,7 +12,7 @@ pip install -r requirements.txt
 streamlit run dashboard_app.py
 ```
 
-啟動後瀏覽器會自動開啟，若未開啟可手動進入終端顯示網址（通常是 `http://localhost:8501`）。
+啟動後瀏覽器會自動開啟，若未開啟可手動進入終端顯示網址（ `http://localhost:8501`）。
 
 ## 2) 目前頁面與功能
 
@@ -44,12 +44,6 @@ streamlit run dashboard_app.py
 - `hour`（事故時）
 - `lat`（緯度）
 - `lon`（經度）
-
-建議欄位（有會更完整）：
-
-- `month`, `district`, `accident_type`, `deaths`, `injuries`, `city`
-
-> 若 CSV 含 `city` 欄位，系統會自動篩出「台中/臺中」資料，符合題目範圍。
 
 ## 4) 題目對應
 
