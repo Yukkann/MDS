@@ -930,11 +930,6 @@ with tab1:
             autoplay_interval = st.slider("播放間隔（秒）", 0.5, 2.0, 1.2, 0.1, key=AUTOPLAY_INTERVAL_KEY)
 
         st.plotly_chart(make_accident_amount_timeline(trend_view, int(sel_month)), use_container_width=True)
-        if autoplay and len(month_options) > 1:
-            time.sleep(float(autoplay_interval))
-            current_idx = month_options.index(st.session_state[MONTH_STATE_KEY])
-            st.session_state[MONTH_STATE_KEY] = month_options[(current_idx + 1) % len(month_options)]
-            st.rerun()
     with right:
         st.subheader(f"決策建議清單（{int(sel_month)}月 Top 15）")
         decision_cols = ["district", "hour", "risk_level", "strategy"]
@@ -1045,3 +1040,9 @@ with tab3:
     st.write("- Summary Bar Plot 用來比較整體特徵重要性。")
     st.write("- Beeswarm Plot 用來觀察特徵值高低如何推升或降低致命事故預測。")
     st.write("- Waterfall Plot 用來解釋單一事故案例的預測來源。")
+
+if st.session_state.get(AUTOPLAY_KEY, False) and len(month_options) > 1:
+    time.sleep(float(st.session_state.get(AUTOPLAY_INTERVAL_KEY, 1.2)))
+    current_idx = month_options.index(st.session_state[MONTH_STATE_KEY])
+    st.session_state[MONTH_STATE_KEY] = month_options[(current_idx + 1) % len(month_options)]
+    st.rerun()
