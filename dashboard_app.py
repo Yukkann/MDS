@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import io
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -17,10 +18,44 @@ TAICHUNG_DISTRICTS = [
     "新社區", "潭子區", "大雅區", "神岡區", "大肚區", "沙鹿區", "龍井區", "梧棲區",
     "清水區", "大甲區", "外埔區", "大安區", "和平區"
 ]
+TAICHUNG_DISTRICT_CENTERS = {
+    "中區": (24.143, 120.681),
+    "東區": (24.137, 120.698),
+    "南區": (24.121, 120.665),
+    "西區": (24.144, 120.666),
+    "北區": (24.158, 120.683),
+    "北屯區": (24.182, 120.725),
+    "西屯區": (24.181, 120.635),
+    "南屯區": (24.141, 120.617),
+    "太平區": (24.126, 120.735),
+    "大里區": (24.099, 120.677),
+    "霧峰區": (24.043, 120.700),
+    "烏日區": (24.104, 120.624),
+    "豐原區": (24.252, 120.722),
+    "后里區": (24.310, 120.714),
+    "石岡區": (24.276, 120.779),
+    "東勢區": (24.258, 120.830),
+    "新社區": (24.243, 120.809),
+    "潭子區": (24.213, 120.705),
+    "大雅區": (24.225, 120.650),
+    "神岡區": (24.257, 120.661),
+    "大肚區": (24.153, 120.544),
+    "沙鹿區": (24.237, 120.558),
+    "龍井區": (24.193, 120.546),
+    "梧棲區": (24.257, 120.531),
+    "清水區": (24.269, 120.574),
+    "大甲區": (24.347, 120.622),
+    "外埔區": (24.334, 120.654),
+    "大安區": (24.365, 120.586),
+    "和平區": (24.173, 121.140),
+}
 
-PROCESSED_DATA_PATH = Path("MDS_model/MDS_model/processed_data.csv")
-DEFAULT_XGB_DATA_PATH = Path("MDS_model/MDS_model/selected_data_6m_0514.csv")
-LR_PROB_PATH = Path("MDS_model/MDS_model/lr_prob.csv")
+MODEL_DATA_DIR = Path("MDS_model_0514/MDS_model_0514")
+PROCESSED_DATA_PATH = MODEL_DATA_DIR / "processed_data.csv"
+DEFAULT_XGB_DATA_PATH = MODEL_DATA_DIR / "selected_data_6m_0514.csv"
+LR_DASHBOARD_DATA_PATH = MODEL_DATA_DIR / "lr_dashboard_data.csv"
+RF_DASHBOARD_DATA_PATH = MODEL_DATA_DIR / "rf_dashboard_data.csv"
+XGB_DASHBOARD_DATA_PATH = MODEL_DATA_DIR / "xgb_dashboard_data.csv"
 SHAP_ARTIFACT_PATH = Path("MDS_model/MDS_model/shap_dashboard_data.npz")
 CONTINUOUS_COLS = ["GPS座標X", "GPS座標Y", "hour", "month", "weekday", "道路速限"]
 TARGET_COL = "Y_事故嚴重度"
@@ -85,6 +120,14 @@ def infer_hour(row: pd.Series) -> int:
         return int(row.get("hour", 0))
     if pd.notna(row.get("時刻(小時)", np.nan)):
         return int(row.get("時刻(小時)", 0))
+    if row.get("早上車潮", 0) == 1 or row.get("早上車潮時段", 0) == 1:
+        return 8
+    if row.get("傍晚車潮", 0) == 1 or row.get("傍晚車潮時段", 0) == 1:
+        return 17
+    if row.get("夜間", 0) == 1:
+        return 22
+    if row.get("日間時段", 0) == 1:
+        return 13
     if row.get("time_period_morning_rush", 0) == 1 or row.get("is_morning_rush", 0) == 1:
         return 8
     if row.get("time_period_evening_rush", 0) == 1 or row.get("is_evening_rush", 0) == 1:
@@ -96,17 +139,39 @@ def infer_hour(row: pd.Series) -> int:
     return 0
 
 
+def infer_districts_from_coordinates(df: pd.DataFrame) -> pd.Series:
+    if not {"GPS座標X", "GPS座標Y"}.issubset(df.columns):
+        return pd.Series("其他區", index=df.index)
+
+    lon = pd.to_numeric(df["GPS座標X"], errors="coerce").to_numpy()
+    lat = pd.to_numeric(df["GPS座標Y"], errors="coerce").to_numpy()
+    district_names = np.asarray(list(TAICHUNG_DISTRICT_CENTERS.keys()))
+    centers = np.asarray(list(TAICHUNG_DISTRICT_CENTERS.values()), dtype=float)
+
+    lat_rad = np.deg2rad(lat[:, None])
+    center_lat_rad = np.deg2rad(centers[:, 0][None, :])
+    lat_delta = lat[:, None] - centers[:, 0][None, :]
+    lon_delta = (lon[:, None] - centers[:, 1][None, :]) * np.cos((lat_rad + center_lat_rad) / 2)
+    distances = lat_delta**2 + lon_delta**2
+    safe_distances = np.where(np.isnan(distances), np.inf, distances)
+    nearest = district_names[np.argmin(safe_distances, axis=1)]
+    inferred = pd.Series(nearest, index=df.index)
+    invalid = np.isnan(lat) | np.isnan(lon) | np.isinf(safe_distances).all(axis=1)
+    return inferred.where(~invalid, "其他區")
+
+
 def infer_districts(df: pd.DataFrame) -> pd.Series:
     district_cols = [col for col in df.columns if col.startswith("區_")]
     if not district_cols:
         district_cols = [col for col in TAICHUNG_DISTRICTS if col in df.columns]
     if not district_cols:
-        return pd.Series("未提供", index=df.index)
+        return infer_districts_from_coordinates(df)
 
     active = df[district_cols].fillna(0).astype(float)
     district = active.idxmax(axis=1).str.replace("區_", "", regex=False)
     has_district = active.max(axis=1) > 0
-    return district.where(has_district, "未提供")
+    inferred = infer_districts_from_coordinates(df)
+    return district.where(has_district, inferred)
 
 
 def prepare_dashboard_columns(df: pd.DataFrame, actual_severity: Optional[pd.Series] = None) -> pd.DataFrame:
@@ -122,7 +187,7 @@ def prepare_dashboard_columns(df: pd.DataFrame, actual_severity: Optional[pd.Ser
     out["month"] = out["month"].fillna(0).astype(int)
     out["hour"] = out.apply(infer_hour, axis=1)
     out["district"] = infer_districts(out)
-    out["accident_type"] = "未提供"
+    out["accident_type"] = "其他區"
     out["case_id"] = out["序號"] if "序號" in out.columns else np.arange(1, len(out) + 1)
     if actual_severity is not None:
         out["actual_severity"] = actual_severity.to_numpy()
@@ -165,6 +230,24 @@ def load_xgboost_dashboard_data(csv_source) -> pd.DataFrame:
     df = raw.copy()
     df["pred_prob"] = pred_prob
     return prepare_dashboard_columns(df, actual_severity=y)
+
+
+@st.cache_data(show_spinner="正在載入模型預先輸出的 dashboard CSV...")
+def load_model_dashboard_csv(csv_path: str) -> pd.DataFrame:
+    raw = pd.read_csv(csv_path)
+    if "y_prob" not in raw.columns:
+        raise ValueError(f"{csv_path} 缺少 y_prob 欄位。")
+
+    df = raw.copy()
+    df["pred_prob"] = pd.to_numeric(df["y_prob"], errors="coerce")
+
+    actual = None
+    if "y_true" in df.columns:
+        actual = df["y_true"].astype(int)
+    elif "Y_事故嚴重度" in df.columns:
+        actual = df["Y_事故嚴重度"].astype(int)
+
+    return prepare_dashboard_columns(df, actual_severity=actual)
 
 
 @st.cache_data(show_spinner="正在載入 Logistic Regression 預測結果...")
@@ -232,12 +315,56 @@ def make_monthly_risk_timeline(df: pd.DataFrame, selected_month: int) -> go.Figu
         height=260,
         margin=dict(l=10, r=10, t=20, b=10),
         xaxis=dict(title="月份", tickmode="array", tickvals=MONTH_SEQUENCE),
-        yaxis=dict(title="平均預測風險", range=[0, 1]),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
     return fig
 
+def make_accident_amount_timeline(df: pd.DataFrame, selected_month: int) -> go.Figure:
+    """畫每個月份 Low / Medium / High 風險件數。"""
+    risk_order = ["Low", "Medium", "High"]
+    risk_labels = {"Low": "低風險", "Medium": "中風險", "High": "高風險"}
+    risk_colors = {"Low": "#2CA02C", "Medium": "#F59E0B", "High": "#D62728"}
 
+    monthly = (
+        df.assign(risk_level=df["risk_level"].astype(str))
+        .groupby(["month", "risk_level"], as_index=False)
+        .size()
+        .pivot(index="month", columns="risk_level", values="size")
+        .reindex(MONTH_SEQUENCE, fill_value=0)
+        .reindex(columns=risk_order, fill_value=0)
+        .reset_index()
+        .rename(columns={"index": "month"})
+    )
+    monthly["total"] = monthly[risk_order].sum(axis=1)
+
+    fig = go.Figure()
+    for risk in risk_order:
+        fig.add_trace(
+            go.Bar(
+                x=monthly["month"],
+                y=monthly[risk],
+                name=risk_labels[risk],
+                marker_color=risk_colors[risk],
+                customdata=np.stack([monthly["total"]], axis=1),
+                hovertemplate=(
+                    "%{x}月<br>"
+                    f"{risk_labels[risk]}件數: " + "%{y:,}<br>"
+                    "總事故件數: %{customdata[0]:,}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    fig.add_vline(x=selected_month, line_width=2, line_dash="dash", line_color="#D62728")
+    fig.update_layout(
+        title=f"每月風險件數",
+        height=260,
+        margin=dict(l=10, r=10, t=20, b=10),
+        barmode="stack",
+        xaxis=dict(title="月份", tickmode="array", tickvals=MONTH_SEQUENCE),
+        yaxis=dict(title="事故件數"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    return fig
 
 @st.cache_data
 def load_precomputed_shap_dashboard_data(artifact_path: str) -> dict:
@@ -410,10 +537,38 @@ def strategy_by_risk(risk: str) -> str:
     return mapping.get(risk, "維持現狀")
 
 
-def build_layered_map(view: pd.DataFrame, show_hist: bool, show_high: bool, show_patrol: bool) -> go.Figure:
+def make_radius_circle(lat: float, lon: float, radius_km: float, points: int = 96) -> tuple[np.ndarray, np.ndarray]:
+    angles = np.linspace(0, 2 * np.pi, points)
+    lat_radius = radius_km / 111.0
+    lon_radius = radius_km / (111.0 * max(np.cos(np.deg2rad(lat)), 0.1))
+    circle_lat = lat + lat_radius * np.sin(angles)
+    circle_lon = lon + lon_radius * np.cos(angles)
+    return circle_lat, circle_lon
+
+
+@st.cache_data(show_spinner=False)
+def build_layered_map(
+    view: pd.DataFrame,
+    show_hist: bool,
+    show_medium: bool,
+    show_high: bool,
+    show_patrol: bool,
+) -> go.Figure:
     fig = go.Figure()
+    risk_colorscale = [
+        [0.0, "rgba(255,255,255,0.0)"],
+        [0.4, "#FFFFFF"],
+        [0.7, "#F59E0B"],
+        [1.0, "#D62728"],
+    ]
 
     if show_hist:
+        history_colorscale = [
+            [0.0, "#6BAED6"],
+            [0.35, "#4292C6"],
+            [0.7, "#2171B5"],
+            [1.0, "#084594"],
+        ]
         fig.add_trace(
             go.Densitymap(
                 lat=view["lat"],
@@ -421,15 +576,50 @@ def build_layered_map(view: pd.DataFrame, show_hist: bool, show_high: bool, show
                 z=np.ones(len(view)),
                 radius=22,
                 name="歷史事故熱區",
-                colorscale="Blues",
-                opacity=0.55,
-                colorbar=dict(title="事故密度"),
+                colorscale=history_colorscale,
+                opacity=0.68,
+                colorbar=dict(
+                    title=dict(text="事故密度", side="right"),
+                    x=1.01,
+                    y=0.78,
+                    len=0.38,
+                    thickness=14,
+                ),
                 text=view["district"],
                 hovertemplate="歷史事故熱區<br>行政區: %{text}<extra></extra>",
             )
         )
 
+    medium = view[view["risk_level"] == "Medium"]
     high = view[view["risk_level"] == "High"]
+    if show_medium and not medium.empty:
+        fig.add_trace(
+            go.Densitymap(
+                lat=medium["lat"],
+                lon=medium["lon"],
+                z=medium["pred_prob"],
+                radius=24,
+                name="模型中風險熱區",
+                colorscale=risk_colorscale,
+                zmin=0,
+                zmax=1,
+                opacity=0.62,
+                showscale=not (show_high and not high.empty),
+                colorbar=dict(
+                    title=dict(text="模型風險", side="right"),
+                    x=1.01,
+                    y=0.28,
+                    len=0.38,
+                    thickness=14,
+                    tickmode="array",
+                    tickvals=[0.0, 0.4, 0.7, 1.0],
+                    ticktext=["無風險", "低", "中", "高"],
+                ),
+                text=(medium["district"] + " | P=" + medium["pred_prob"].round(2).astype(str)),
+                hovertemplate="模型中風險熱區<br>%{text}<br>決策: 定期巡查<extra></extra>",
+            )
+        )
+
     if show_high and not high.empty:
         fig.add_trace(
             go.Densitymap(
@@ -438,22 +628,76 @@ def build_layered_map(view: pd.DataFrame, show_hist: bool, show_high: bool, show
                 z=high["pred_prob"],
                 radius=28,
                 name="模型高風險熱區",
-                colorscale="YlOrRd",
+                colorscale=risk_colorscale,
+                zmin=0,
+                zmax=1,
                 opacity=0.72,
-                colorbar=dict(title="風險強度", x=1.08),
+                colorbar=dict(
+                    title=dict(text="模型風險", side="right"),
+                    x=1.01,
+                    y=0.28,
+                    len=0.38,
+                    thickness=14,
+                    tickmode="array",
+                    tickvals=[0.0, 0.4, 0.7, 1.0],
+                    ticktext=["無風險", "低", "中", "高"],
+                ),
                 text=(high["district"] + " | P=" + high["pred_prob"].round(2).astype(str)),
-                hovertemplate="模型高風險熱區<br>%{text}<extra></extra>",
+                hovertemplate="模型高風險熱區<br>%{text}<br>決策: 優先派遣警力 / 加強巡邏<extra></extra>",
             )
         )
 
     if show_patrol:
+        patrol_source = view[view["risk_level"].isin(["High", "Medium"])].copy()
         patrol = (
-            high.groupby("district", as_index=False)
-            .agg(lat=("lat", "mean"), lon=("lon", "mean"), cnt=("district", "count"), p=("pred_prob", "mean"))
-            .sort_values("cnt", ascending=False)
+            patrol_source.groupby("district", as_index=False)
+            .agg(
+                lat=("lat", "mean"),
+                lon=("lon", "mean"),
+                cnt=("district", "count"),
+                high_count=("risk_level", lambda s: int((s == "High").sum())),
+                medium_count=("risk_level", lambda s: int((s == "Medium").sum())),
+                p=("pred_prob", "mean"),
+            )
+            .assign(priority=lambda d: d["high_count"] * 2 + d["medium_count"])
+            .sort_values(["priority", "p"], ascending=False)
             .head(8)
         )
         if not patrol.empty:
+            patrol["decision"] = np.where(
+                patrol["high_count"] > 0,
+                "優先派遣警力 / 加強巡邏",
+                "定期巡查",
+            )
+            for idx, area in patrol.iterrows():
+                points = patrol_source[patrol_source["district"].eq(area["district"])].copy()
+                if points.empty:
+                    radius_km = 0.6
+                else:
+                    lat_delta_km = (points["lat"] - area["lat"]) * 111.0
+                    lon_delta_km = (points["lon"] - area["lon"]) * 111.0 * np.cos(np.deg2rad(area["lat"]))
+                    distance_km = np.sqrt(lat_delta_km**2 + lon_delta_km**2)
+                    radius_km = float(np.nanpercentile(distance_km, 75)) if len(distance_km) else 0.6
+                    radius_km = float(np.clip(radius_km, 0.6, 3.0))
+                circle_lat, circle_lon = make_radius_circle(area["lat"], area["lon"], radius_km)
+                fig.add_trace(
+                    go.Scattermap(
+                        lat=circle_lat,
+                        lon=circle_lon,
+                        mode="lines",
+                        name="建議巡邏範圍" if idx == patrol.index[0] else "建議巡邏範圍",
+                        line=dict(color="#F34312", width=2),
+                        opacity=0.85,
+                        hovertemplate=(
+                            "建議巡邏範圍<br>"
+                            f"行政區: {area['district']}<br>"
+                            f"巡邏半徑: {radius_km:.1f} km<br>"
+                            f"決策: {area['decision']}"
+                            "<extra></extra>"
+                        ),
+                        showlegend=bool(idx == patrol.index[0]),
+                    )
+                )
             fig.add_trace(
                 go.Scattermap(
                     lat=patrol["lat"],
@@ -463,16 +707,103 @@ def build_layered_map(view: pd.DataFrame, show_hist: bool, show_high: bool, show
                     marker=dict(size=16, color="#F34312", symbol="star"),
                     text=patrol["district"],
                     textposition="top right",
-                    hovertemplate="建議巡邏區域<br>%{text}<br>高風險點數: %{customdata[0]}<br>平均P: %{customdata[1]:.2f}<extra></extra>",
-                    customdata=np.stack([patrol["cnt"], patrol["p"]], axis=1),
+                    hovertemplate=(
+                        "建議巡邏區域<br>"
+                        "行政區: %{text}<br>"
+                        "高風險件數: %{customdata[0]}<br>"
+                        "中風險件數: %{customdata[1]}<br>"
+                        "平均P: %{customdata[2]:.2f}<br>"
+                        "決策: %{customdata[3]}"
+                        "<extra></extra>"
+                    ),
+                    customdata=np.stack(
+                        [patrol["high_count"], patrol["medium_count"], patrol["p"], patrol["decision"]],
+                        axis=1,
+                    ),
                 )
             )
 
     fig.update_layout(
         map=dict(style="open-street-map", center=TAICHUNG_CENTER, zoom=11),
+        uirevision="taichung-risk-map",
+        datarevision=str(len(view)),
         margin=dict(l=0, r=0, t=0, b=0),
         height=600,
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
+    )
+    return fig
+
+
+def build_animated_layered_map(
+    df: pd.DataFrame,
+    month_options: list[int],
+    selected_month: int,
+    show_hist: bool,
+    show_medium: bool,
+    show_high: bool,
+    show_patrol: bool,
+) -> go.Figure:
+    month_figs = {}
+    for month in month_options:
+        month_view = df[df["month"].eq(month)].copy()
+        if not month_view.empty:
+            month_figs[int(month)] = build_layered_map(month_view, show_hist, show_medium, show_high, show_patrol)
+
+    if not month_figs:
+        return build_layered_map(df.iloc[0:0].copy(), show_hist, show_medium, show_high, show_patrol)
+
+    initial_month = int(selected_month) if int(selected_month) in month_figs else next(iter(month_figs))
+    fig = go.Figure(data=month_figs[initial_month].data, layout=month_figs[initial_month].layout)
+    fig.frames = [
+        go.Frame(name=str(month), data=month_fig.data)
+        for month, month_fig in month_figs.items()
+    ]
+
+    frame_args = {
+        "frame": {"duration": 250, "redraw": True},
+        "mode": "immediate",
+        "transition": {"duration": 250},
+    }
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=0, b=60),
+        sliders=[
+            {
+                "active": list(month_figs.keys()).index(initial_month),
+                "currentvalue": {"prefix": "月份: ", "suffix": "月"},
+                "pad": {"t": 35},
+                "steps": [
+                    {
+                        "args": [[str(month)], frame_args],
+                        "label": f"{month}月",
+                        "method": "animate",
+                    }
+                    for month in month_figs
+                ],
+            }
+        ],
+        updatemenus=[
+            {
+                "type": "buttons",
+                "direction": "left",
+                "x": 0,
+                "y": 0,
+                "xanchor": "left",
+                "yanchor": "top",
+                "pad": {"t": 35, "r": 10},
+                "buttons": [
+                    {
+                        "label": "播放",
+                        "method": "animate",
+                        "args": [None, frame_args],
+                    },
+                    {
+                        "label": "暫停",
+                        "method": "animate",
+                        "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}],
+                    },
+                ],
+            }
+        ],
     )
     return fig
 
@@ -483,7 +814,11 @@ with st.sidebar:
     st.header("控制面板")
     model_source = st.selectbox(
         "總攬頁模型來源",
-        ["Logistic Regression (lr_prob.csv)", "XGBoost 即時計算"],
+        [
+            "Logistic Regression (lr_dashboard_data.csv)",
+            "Random Forest (rf_dashboard_data.csv)",
+            "XGBoost (xgb_dashboard_data.csv)",
+        ],
     )
     uploaded = st.file_uploader("上傳臺中市事故資料（CSV）", type=["csv"])
     threshold_high = st.slider("高風險門檻 (P ≥)", 0.5, 0.9, 0.7, 0.01)
@@ -491,33 +826,43 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("地圖圖層開關")
     show_hist = st.checkbox("歷史事故熱區", value=True)
+    show_medium = st.checkbox("模型中風險熱區", value=True)
     show_high = st.checkbox("模型高風險熱區", value=True)
     show_patrol = st.checkbox("建議巡邏區域", value=True)
     st.markdown("---")
 
-model_label = "Logistic Regression" if model_source.startswith("Logistic") else "XGBoost"
+if model_source.startswith("Logistic"):
+    model_label = "Logistic Regression"
+elif model_source.startswith("Random"):
+    model_label = "Random Forest"
+else:
+    model_label = "XGBoost"
 st.caption(f"資料範圍：7~12 月，總攬頁使用 {model_label} 預測風險")
 
 if model_source.startswith("Logistic"):
     if uploaded is not None:
-        st.warning("Logistic Regression 模式會使用 processed_data.csv + lr_prob.csv 對回測試集；上傳檔只適用於 XGBoost 即時計算模式。")
+        st.warning("Logistic Regression 模式會直接使用 lr_dashboard_data.csv；上傳檔不會套用。")
     try:
-        df = load_lr_dashboard_data(str(PROCESSED_DATA_PATH), str(LR_PROB_PATH))
+        df = load_model_dashboard_csv(str(LR_DASHBOARD_DATA_PATH))
     except (RuntimeError, ValueError, FileNotFoundError) as exc:
         st.error(str(exc))
         st.stop()
-elif uploaded is not None:
+elif model_source.startswith("Random"):
+    if uploaded is not None:
+        st.warning("Random Forest 模式會直接使用 rf_dashboard_data.csv；上傳檔不會套用。")
     try:
-        df = load_xgboost_dashboard_data(uploaded.getvalue())
-    except (RuntimeError, ValueError) as exc:
+        df = load_model_dashboard_csv(str(RF_DASHBOARD_DATA_PATH))
+    except (RuntimeError, ValueError, FileNotFoundError) as exc:
         st.error(str(exc))
         st.stop()
 else:
+    if uploaded is not None:
+        st.warning("XGBoost 模式會直接使用 xgb_dashboard_data.csv；上傳檔不會套用。")
     try:
-        df = load_xgboost_dashboard_data(str(DEFAULT_XGB_DATA_PATH))
-    except (RuntimeError, ValueError) as exc:
-        st.warning(f"{exc} 目前改用示範資料。")
-        df = generate_demo_data()
+        df = load_model_dashboard_csv(str(XGB_DASHBOARD_DATA_PATH))
+    except (RuntimeError, ValueError, FileNotFoundError) as exc:
+        st.error(str(exc))
+        st.stop()
 
 if df.empty:
     st.error("目前篩選後無臺中市資料，請確認上傳資料內容。")
@@ -532,20 +877,21 @@ df["strategy"] = df["risk_level"].astype(str).map(strategy_by_risk)
 if "month" not in df.columns:
     df["month"] = infer_months_by_order(len(df))
 if "district" not in df.columns:
-    df["district"] = "未提供"
+    df["district"] = "其他區"
 if "accident_type" not in df.columns:
-    df["accident_type"] = "未提供"
+    df["accident_type"] = "其他區"
 
 month_options = [month for month in MONTH_SEQUENCE if month in set(df["month"].dropna().astype(int))]
 if not month_options:
     month_options = sorted(df["month"].dropna().astype(int).unique().tolist())
-sel_month = st.select_slider(
-    "7~12 月連續時間軸",
-    options=month_options,
-    value=month_options[0],
-    format_func=lambda month: f"{int(month)}月",
-)
+MONTH_STATE_KEY = "overview_month"
+AUTOPLAY_KEY = "timeline_autoplay"
+AUTOPLAY_INTERVAL_KEY = "timeline_autoplay_interval"
+if MONTH_STATE_KEY not in st.session_state or st.session_state[MONTH_STATE_KEY] not in month_options:
+    st.session_state[MONTH_STATE_KEY] = month_options[0]
+sel_month = st.session_state[MONTH_STATE_KEY]
 sel_district = st.multiselect("篩選行政區", sorted(df["district"].dropna().unique().tolist()), default=sorted(df["district"].dropna().unique().tolist()))
+
 trend_view = df[df["district"].isin(sel_district)].copy()
 view = trend_view[trend_view["month"].eq(sel_month)].copy()
 if view.empty:
@@ -561,17 +907,37 @@ with tab1:
     k3.metric("平均預測風險", f"{view['pred_prob'].mean():.2f}")
     k4.metric("實際嚴重事故", f"{view.get('actual_severity', pd.Series([0]*len(view))).sum():,}")
     k5.metric("時間軸月份", f"{int(sel_month)}月")
-    k6.metric("更新時間", datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"))
-
-    st.plotly_chart(make_monthly_risk_timeline(trend_view, int(sel_month)), width="stretch")
+    # k6.metric("更新時間", datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"))
 
     left, right = st.columns([2, 1])
     with left:
         st.subheader(f"臺中市事故風險熱區地圖（{int(sel_month)}月）")
-        st.plotly_chart(build_layered_map(view, show_hist, show_high, show_patrol), width="stretch")
+        st.plotly_chart(build_layered_map(view, show_hist, show_medium, show_high, show_patrol), use_container_width=True)
+        selected_month = st.select_slider(
+            "7~12 月連續時間軸",
+            options=month_options,
+            value=sel_month,
+            format_func=lambda month: f"{int(month)}月",
+        )
+        if selected_month != st.session_state[MONTH_STATE_KEY]:
+            st.session_state[MONTH_STATE_KEY] = selected_month
+            st.rerun()
+
+        play_col, speed_col = st.columns([1, 2])
+        with play_col:
+            autoplay = st.checkbox("自動播放", key=AUTOPLAY_KEY)
+        with speed_col:
+            autoplay_interval = st.slider("播放間隔（秒）", 0.5, 2.0, 1.2, 0.1, key=AUTOPLAY_INTERVAL_KEY)
+
+        st.plotly_chart(make_accident_amount_timeline(trend_view, int(sel_month)), use_container_width=True)
+        if autoplay and len(month_options) > 1:
+            time.sleep(float(autoplay_interval))
+            current_idx = month_options.index(st.session_state[MONTH_STATE_KEY])
+            st.session_state[MONTH_STATE_KEY] = month_options[(current_idx + 1) % len(month_options)]
+            st.rerun()
     with right:
         st.subheader(f"決策建議清單（{int(sel_month)}月 Top 15）")
-        decision_cols = ["case_id", "district", "hour", "pred_prob", "risk_level", "strategy"]
+        decision_cols = ["district", "hour", "risk_level", "strategy"]
         decision_cols = [col for col in decision_cols if col in view.columns]
         rec = (
             view.sort_values("pred_prob", ascending=False)
@@ -588,30 +954,36 @@ with tab1:
                 "strategy": "決策策略",
             }
         )
+        risk_col = f"{model_label}風險"
+        if risk_col in rec.columns:
+            rec[risk_col] = rec[risk_col].map(lambda value: f"{value:.3f}")
         st.dataframe(rec, width="stretch", hide_index=True)
+        st.markdown("**本月巡邏策略建議**")
+        st.write("圈圈大小 = 該巡邏區中高風險事故點的集中範圍，約包住 75% 的點，但限制在 0.6 到 3 公里之間")
+        st.plotly_chart(make_monthly_risk_timeline(trend_view, int(sel_month)), use_container_width=True)
 
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("高風險時段分析")
         hourly = view.assign(is_high=(view["risk_level"] == "High").astype(int)).groupby("hour", as_index=False)["is_high"].sum()
-        st.plotly_chart(px.bar(hourly, x="hour", y="is_high", labels={"is_high": "高風險件數", "hour": "小時"}), width="stretch")
+        st.plotly_chart(px.bar(hourly, x="hour", y="is_high", labels={"is_high": "高風險件數", "hour": "小時"}), use_container_width=True)
     with c2:
         st.subheader("臺中市各行政區風險比較")
         area = view.groupby("district", as_index=False)["pred_prob"].mean().sort_values("pred_prob", ascending=False)
-        st.plotly_chart(px.bar(area, x="district", y="pred_prob", labels={"pred_prob": "平均風險機率", "district": "行政區"}), width="stretch")
+        st.plotly_chart(px.bar(area, x="district", y="pred_prob", labels={"pred_prob": "平均風險機率", "district": "行政區"}), use_container_width=True)
 
 with tab2:
     st.subheader("模型效能頁")
 
     model_scores = pd.DataFrame(
         {
-            "Model": ["Logistic Regression", "Random Forest", "AdaBoost", "XGBoost"],
-            "Accuracy": [0.5638, 0.5674, 0.5750, 0.5531],
-            "Precision": [0.6299, 0.6212, 0.6050, 0.5986],
-            "Recall": [0.5354, 0.5829, 0.6943, 0.6123],
-            "F1": [0.5788, 0.6014, 0.6466, 0.6054],
-            "ROC_AUC": [0.5947, 0.5917, 0.5703, 0.5712],
-            "PR_AUC": [0.6341, 0.6380, 0.6027, 0.6186],
+            "Model": ["Logistic Regression", "Random Forest", "XGBoost"],
+            "Accuracy": [0.5638, 0.5674, 0.5531],
+            "Precision": [0.6299, 0.6212,0.5986],
+            "Recall": [0.5354, 0.5829, 0.6123],
+            "F1": [0.5788, 0.6014, 0.6054],
+            "ROC_AUC": [0.5947, 0.5917, 0.5712],
+            "PR_AUC": [0.6341, 0.6380, 0.6186],
         }
     )
     st.dataframe(model_scores, width="stretch", hide_index=True)
@@ -619,33 +991,30 @@ with tab2:
     m1, m2 = st.columns(2)
     with m1:
         fig_recall = px.bar(model_scores, x="Model", y="Recall", color="Model", title="Recall 比較")
-        st.plotly_chart(fig_recall, width="stretch")
+        st.plotly_chart(fig_recall, use_container_width=True)
     with m2:
         fig_pr = px.bar(model_scores, x="Model", y="PR_AUC", color="Model", title="PR-AUC 比較")
-        st.plotly_chart(fig_pr, width="stretch")
+        st.plotly_chart(fig_pr, use_container_width=True)
 
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Confusion Matrix(Logistic Regression)**")
         cm = np.array([[1012, 675], [997, 1149]])
         cm_fig = px.imshow(cm, text_auto=True, color_continuous_scale="Blues", labels=dict(x="Predicted", y="True", color="Count"), x=['致命', '非致命'], y=['非致命', '致命'])
-        st.plotly_chart(cm_fig, width="stretch")
+        st.plotly_chart(cm_fig, use_container_width=True)
     with c2:
         st.markdown("**Confusion Matrix(Random Forest)**")
         cm = np.array([[924, 763], [895, 1251]])
         cm_fig = px.imshow(cm, text_auto=True, color_continuous_scale="Blues", labels=dict(x="Predicted", y="True", color="Count"), x=['致命', '非致命'], y=['非致命', '致命'])
-        st.plotly_chart(cm_fig, width="stretch")
+        st.plotly_chart(cm_fig, use_container_width=True)
     c3, c4 = st.columns(2)
     with c3:
-        st.markdown("**Confusion Matrix(AdaBoost)**")
-        cm = np.array([[714, 973], [656, 1490]])
-        cm_fig = px.imshow(cm, text_auto=True, color_continuous_scale="Blues", labels=dict(x="Predicted", y="True", color="Count"), x=['致命', '非致命'], y=['非致命', '致命'])
-        st.plotly_chart(cm_fig, width="stretch")
+        st.markdown("**Confusion Matrix**")
     with c4:
         st.markdown("**Confusion Matrix(XGBoost)**")
         cm = np.array([[806, 881], [832, 1314]])
         cm_fig = px.imshow(cm, text_auto=True, color_continuous_scale="Blues", labels=dict(x="Predicted", y="True", color="Count"), x=['致命', '非致命'], y=['非致命', '致命'])
-        st.plotly_chart(cm_fig, width="stretch")
+        st.plotly_chart(cm_fig, use_container_width=True)
 
 with tab3:
     st.subheader("關鍵因子頁")
@@ -661,15 +1030,15 @@ with tab3:
                 model_shap = shap_result[model_name]
                 st.plotly_chart(
                     make_shap_summary_bar(model_shap, f"{model_name} - Summary Bar Plot"),
-                    width="stretch",
+                    use_container_width=True,
                 )
                 st.plotly_chart(
                     make_shap_beeswarm(model_shap, f"{model_name} - Beeswarm Plot"),
-                    width="stretch",
+                    use_container_width=True,
                 )
                 st.plotly_chart(
                     make_shap_waterfall(model_shap, f"{model_name} - Waterfall Plot"),
-                    width="stretch",
+                    use_container_width=True,
                 )
 
     st.markdown("**解讀建議:**")
